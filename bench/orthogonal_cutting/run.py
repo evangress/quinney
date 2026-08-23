@@ -16,7 +16,12 @@ from KratosMultiphysics.MPMApplication.mpm_analysis import MpmAnalysis
 
 from quinney.kratos_adapter.damage_process import JohnsonCookDamageProcess
 from quinney.kratos_adapter.rigid_tool import RigidToolProcess
-from quinney.materials.ofhc_copper import OFHC_COPPER_DAMAGE
+from quinney.kratos_adapter.softening import DamageSofteningProcess
+from quinney.materials.ofhc_copper import (
+    FRACTURE_ENERGY_J_M2,
+    OFHC_COPPER_DAMAGE,
+    YIELD_STRESS_PA,
+)
 
 HERE = pathlib.Path(__file__).parent
 
@@ -25,8 +30,10 @@ DAMAGE_EVERY = 5  # steps between damage updates; differencing makes this safe
 
 
 class CuttingRun(MpmAnalysis):
-    def __init__(self, model, parameters):
+    def __init__(self, model, parameters, soften=True):
         super().__init__(model, parameters)
+        self.soften = soften
+        self.softening = None
         self.tool = None
         self.damage = None
         self.samples = []
@@ -35,8 +42,12 @@ class CuttingRun(MpmAnalysis):
     def _attach(self):
         workpiece = self.model["MPM_Material.Parts_Workpiece"]
         tool = self.model["MPM_Material.Parts_Tool"]
-        self.tool = RigidToolProcess(tool, (-CUTTING_SPEED_M_S, 0.0), TIME_STEP_S)
-        self.damage = JohnsonCookDamageProcess(workpiece, OFHC_COPPER_DAMAGE)
+        self.tool = RigidToolProcess(tool, (-CUTTING_SPEED_M_S, 0.0))
+        self.damage = JohnsonCookDamageProcess(
+            workpiece, OFHC_COPPER_DAMAGE, FRACTURE_ENERGY_J_M2, YIELD_STRESS_PA
+        )
+        if self.soften:
+            self.softening = DamageSofteningProcess(workpiece)
         print(f"@@@ workpiece points {workpiece.NumberOfElements()}", flush=True)
         print(f"@@@ tool points {tool.NumberOfElements()}", flush=True)
 
@@ -49,6 +60,8 @@ class CuttingRun(MpmAnalysis):
         self.tool.ExecuteFinalizeSolutionStep()
         if self._step % DAMAGE_EVERY == 0:
             self.damage.ExecuteFinalizeSolutionStep()
+            if self.softening is not None:
+                self.softening.apply(self.damage.damage)
         if self._step % SAMPLE_EVERY == 0:
             self._sample()
 

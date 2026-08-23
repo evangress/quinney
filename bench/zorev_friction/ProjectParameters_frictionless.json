@@ -1,0 +1,92 @@
+{
+  "problem_data": {
+    "problem_name": "frictionless",
+    "parallel_type": "OpenMP",
+    "echo_level": 0,
+    "start_time": 0.0,
+    "end_time": 4e-06
+  },
+  "solver_settings": {
+    "solver_type": "Dynamic",
+    "model_part_name": "MPM_Material",
+    "domain_size": 2,
+    "echo_level": 0,
+    "time_integration_method": "explicit",
+    "analysis_type": "linear",
+    "scheme_type": "central_difference",
+    "stress_update": "usl",
+    "model_import_settings": {
+      "input_type": "mdpa",
+      "input_filename": "C:\\Users\\gress\\Github\\quinney\\bench\\zorev_friction\\body"
+    },
+    "grid_model_import_settings": {
+      "input_type": "mdpa",
+      "input_filename": "C:\\Users\\gress\\Github\\quinney\\bench\\zorev_friction\\grid"
+    },
+    "material_import_settings": {
+      "materials_filename": "C:\\Users\\gress\\Github\\quinney\\bench\\zorev_friction\\materials.json"
+    },
+    "time_stepping": {
+      "time_step": 2e-08
+    },
+    "auxiliary_variables_list": [
+      "NORMAL"
+    ],
+    "problem_domain_sub_model_part_list": [
+      "Parts_Block"
+    ],
+    "processes_sub_model_part_list": [
+      "slip_floor",
+      "fixed_base"
+    ]
+  },
+  "processes": {
+    "constraints_process_list": [
+      {
+        "python_module": "assign_vector_variable_process",
+        "kratos_module": "KratosMultiphysics",
+        "Parameters": {
+          "model_part_name": "Background_Grid.fixed_base",
+          "variable_name": "DISPLACEMENT",
+          "constrained": [
+            true,
+            true,
+            true
+          ],
+          "value": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      {
+        "python_module": "apply_mpm_slip_boundary_process",
+        "kratos_module": "KratosMultiphysics.MPMApplication",
+        "process_name": "ApplyMPMSlipBoundaryProcess",
+        "Parameters": {
+          "model_part_name": "Background_Grid.slip_floor",
+          "friction_coefficient": 0.0,
+          "tangential_penalty_coefficient": 0.0
+        }
+      }
+    ],
+    "loads_process_list": [],
+    "list_other_processes": [
+      {
+        "python_module": "assign_initial_velocity_to_material_point_process",
+        "kratos_module": "KratosMultiphysics.MPMApplication",
+        "Parameters": {
+          "model_part_name": "Initial_MPM_Material.Parts_Block",
+          "modulus": 150.0,
+          "direction": [
+            0.0,
+            -1.0,
+            0.0
+          ]
+        }
+      }
+    ]
+  },
+  "output_processes": {}
+}

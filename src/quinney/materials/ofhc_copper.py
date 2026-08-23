@@ -103,3 +103,15 @@ def kratos_material_variables(
         "MATERIAL_POINTS_PER_ELEMENT": material_points_per_element,
         "THICKNESS": 1.0,
     }
+
+
+# Fracture energy per unit crack area (J/m^2), for damage evolution.
+#
+# !!! VERIFY !!!  This is the least certain constant in the file. Ductile
+# copper tears rather than cleaves, so the work of fracture is large and widely
+# scattered in the literature; an order-of-magnitude estimate from
+# G_f ~ K_IC^2 / E with K_IC ~ 50 MPa*sqrt(m) gives ~2e4 J/m^2, and fully
+# ductile values run higher. It sets how fast damage evolves after initiation,
+# so it directly controls chip separation. Treat every result that depends on
+# it as provisional until it is sourced.
+FRACTURE_ENERGY_J_M2 = 1.0e5

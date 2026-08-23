@@ -47,18 +47,28 @@ class RigidToolProcess(KM.Process):
     ``force_history`` accumulates (Fx, Fy) per step in newtons — the raw signal
     behind ``cutting_force_mean``, ``force_oscillation_amplitude`` and the
     segmentation FFT of spec §5.
+
+    The step is read from ``ProcessInfo[DELTA_TIME]`` every step rather than
+    cached at construction. The force here is an impulse divided by dt, and the
+    telemetry writer integrates that same force back over dt to get the work
+    the tool did; if the two used different clocks — and the supervisor is
+    allowed to change the time step between restarts — the work would be wrong
+    by exactly that ratio, monotonically, with nothing to catch it.
+
+    ``cutting_velocity`` is public because it is half of that work integral:
+    whoever integrates the force has to use the velocity it was measured
+    against, and passing the two separately is an invitation to pass one of
+    them wrong.
     """
 
     def __init__(
         self,
         tool_model_part: KM.ModelPart,
         cutting_velocity: tuple[float, float],
-        time_step_s: float,
     ) -> None:
         super().__init__()
         self._part = tool_model_part
-        self._velocity = cutting_velocity
-        self._time_step_s = time_step_s
+        self.cutting_velocity = cutting_velocity
         self.force_history: list[NDArray[np.float64]] = []
 
     def ExecuteFinalizeSolutionStep(self) -> None:
@@ -76,8 +86,10 @@ class RigidToolProcess(KM.Process):
         velocities = [e.CalculateOnIntegrationPoints(MPM.MP_VELOCITY, info)[0] for e in elements]
         measured = np.array([[v[0], v[1]] for v in velocities], dtype=np.float64)
 
-        self.force_history.append(reaction_force(mass, measured, self._velocity, self._time_step_s))
+        self.force_history.append(
+            reaction_force(mass, measured, self.cutting_velocity, float(info[KM.DELTA_TIME]))
+        )
 
-        restored = [self._velocity[0], self._velocity[1], 0.0]
+        restored = [self.cutting_velocity[0], self.cutting_velocity[1], 0.0]
         for element in elements:
             element.SetValuesOnIntegrationPoints(MPM.MP_VELOCITY, [restored], info)

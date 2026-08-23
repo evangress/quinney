@@ -183,3 +183,4 @@ bench/**/materials.json
 bench/**/ProjectParameters.json
 bench/**/telemetry.npz
 bench/**/*.log
+.superpowers/

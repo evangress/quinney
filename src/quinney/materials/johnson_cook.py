@@ -145,17 +145,20 @@ def accumulate_damage(
 class DamageStep:
     """Result of one damage increment over a set of material points.
 
-    ``damage`` is the updated 0..1 field. ``separated`` marks the points whose
-    damage has reached the separation threshold — the ones an erase process
-    should remove, and the ones a what-if preview reports on.
+    ``initiation`` is the Johnson-Cook damage sum omega: at 1.0 the point has
+    *begun* to fail. ``damage`` is the post-initiation variable D that drives
+    softening and reaches 1.0 at separation. Keeping them apart is the whole
+    point — a point that has initiated still carries full stress.
     """
 
+    initiation: NDArray[np.float64]
     damage: NDArray[np.float64]
     separated: NDArray[np.bool_]
 
 
 def advance(
     params: JohnsonCookDamage,
+    initiation: ArrayLike,
     damage: ArrayLike,
     cauchy_xx: ArrayLike,
     cauchy_yy: ArrayLike,
@@ -163,19 +166,24 @@ def advance(
     delta_plastic_strain: ArrayLike,
     plastic_strain_rate_per_s: ArrayLike,
     temperature_k: ArrayLike,
+    characteristic_length_m: ArrayLike,
+    fracture_displacement_m: ArrayLike,
     separation_threshold: float = 1.0,
 ) -> DamageStep:
-    """Advance damage one increment from raw material-point state.
+    """Advance both damage phases one increment from raw material-point state.
+
+    Initiation accumulates everywhere plastic strain grows. Evolution advances
+    only where initiation has completed, so material that has yielded heavily
+    but not yet initiated stays undamaged and at full strength.
 
     ``separation_threshold`` is the knob the supervisor tunes (§6
-    ``adjust_deletion_threshold``). It defaults to 1.0, the textbook criterion.
-    Because this function is pure, calling it with a candidate threshold and
-    *not* applying the result is exactly how the supervisor previews a change
-    before proposing it.
+    ``adjust_deletion_threshold``). Because this function is pure, calling it
+    with a candidate threshold and *not* applying the result is exactly how the
+    supervisor previews a change before proposing it.
     """
     triaxiality = triaxiality_from_plane_strain_stress(cauchy_xx, cauchy_yy, equivalent_stress)
-    updated = accumulate_damage(
-        damage=damage,
+    advanced_initiation = accumulate_damage(
+        damage=initiation,
         delta_plastic_strain=delta_plastic_strain,
         fracture_strain=fracture_strain(
             params,
@@ -184,4 +192,77 @@ def advance(
             temperature_k=temperature_k,
         ),
     )
-    return DamageStep(damage=updated, separated=updated >= separation_threshold)
+
+    evolved = evolve_damage(
+        damage=damage,
+        delta_plastic_strain=delta_plastic_strain,
+        characteristic_length_m=characteristic_length_m,
+        fracture_displacement_m=fracture_displacement_m,
+    )
+    initiated = advanced_initiation >= 1.0
+    advanced_damage = np.where(initiated, evolved, np.asarray(damage, dtype=np.float64))
+
+    return DamageStep(
+        initiation=advanced_initiation,
+        damage=advanced_damage,
+        separated=advanced_damage >= separation_threshold,
+    )
+
+
+# A fully damaged point keeps a sliver of strength rather than none. Exactly
+# zero gives a stressless point that inverts and destabilizes the explicit
+# step; separation removes it instead of leaving it to misbehave.
+RESIDUAL_STRENGTH_FRACTION = 1e-3
+
+
+def fracture_displacement(
+    fracture_energy_j_m2: ArrayLike,
+    yield_stress_pa: ArrayLike,
+) -> NDArray[np.float64]:
+    """Plastic displacement at separation, u_f = 2 G_f / sigma_y (Hillerborg).
+
+    This is what makes damage evolution mesh-objective. Expressing failure as a
+    displacement over a characteristic length, rather than a strain, fixes the
+    energy dissipated per unit crack area — so refining the mesh no longer
+    changes how much energy it costs to separate the chip.
+
+    Spec §1 calls the deletion threshold "notoriously arbitrary and
+    mesh-dependent". This is the part that makes it neither.
+    """
+    fracture_energy_j_m2 = np.asarray(fracture_energy_j_m2, dtype=np.float64)
+    yield_stress_pa = np.asarray(yield_stress_pa, dtype=np.float64)
+    return 2.0 * fracture_energy_j_m2 / yield_stress_pa
+
+
+def evolve_damage(
+    damage: ArrayLike,
+    delta_plastic_strain: ArrayLike,
+    characteristic_length_m: ArrayLike,
+    fracture_displacement_m: ArrayLike,
+) -> NDArray[np.float64]:
+    """Advance post-initiation damage D toward separation at D = 1.
+
+    The increment is the plastic *displacement* L * delta_eps_p over the
+    fracture displacement, so a point twice the size damages twice as fast per
+    unit strain. Call this only for points that have already initiated;
+    before initiation the material is undamaged however much it has yielded.
+    """
+    damage = np.asarray(damage, dtype=np.float64)
+    delta_plastic_strain = np.asarray(delta_plastic_strain, dtype=np.float64)
+    characteristic_length_m = np.asarray(characteristic_length_m, dtype=np.float64)
+    fracture_displacement_m = np.asarray(fracture_displacement_m, dtype=np.float64)
+
+    plastic_displacement = characteristic_length_m * np.maximum(delta_plastic_strain, 0.0)
+    return np.minimum(damage + plastic_displacement / fracture_displacement_m, 1.0)
+
+
+def degradation_factor(damage: ArrayLike) -> NDArray[np.float64]:
+    """Stress-carrying fraction (1 - D), floored at a residual.
+
+    Applied as sigma = (1 - D) * sigma_bar. Kratos' compiled Johnson-Cook law
+    computes stress internally with no hook to scale it, so quinney applies
+    this by degrading the material properties the law reads — see
+    ``kratos_adapter.softening``.
+    """
+    damage = np.asarray(damage, dtype=np.float64)
+    return np.maximum(1.0 - damage, RESIDUAL_STRENGTH_FRACTION)

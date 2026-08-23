@@ -218,38 +218,45 @@ class TestAccumulateDamage:
 
 
 class TestAdvance:
-    """One damage step from raw material-point state.
+    """One damage step, both phases, from raw material-point state.
 
-    This is what the in-loop Kratos process calls each cycle, and what the
-    supervisor calls offline to preview a threshold change. Same function, so
-    the preview cannot drift from the simulation.
+    Johnson-Cook damage has two stages and conflating them is the classic
+    mistake: a point that has *initiated* has not failed, it has begun to fail.
+    Separation happens when the evolution variable reaches 1, after dissipating
+    the fracture energy over the point's characteristic length.
     """
 
     STATE: typing.ClassVar[dict] = {
         "cauchy_xx": np.array([100e6, 100e6]),
         "cauchy_yy": np.array([-100e6, -100e6]),
         "equivalent_stress": np.array([100e6, 100e6]),
-        "delta_plastic_strain": np.array([1.0, 0.0]),
         "plastic_strain_rate_per_s": np.array([1.0, 1.0]),
         "temperature_k": np.array([300.0, 300.0]),
+        "characteristic_length_m": np.array([1e-3, 1e-3]),
+        "fracture_displacement_m": np.array([1e-3, 1e-3]),
     }
 
-    def test_damage_advances_only_where_plastic_strain_grew(self):
-        step = advance(PARAMS, damage=np.array([0.0, 0.0]), **self.STATE)
-        assert step.damage[0] > 0.0
-        assert step.damage[1] == 0.0
+    def advance_from(self, initiation, damage, delta):
+        return advance(
+            PARAMS,
+            initiation=np.asarray(initiation, dtype=float),
+            damage=np.asarray(damage, dtype=float),
+            delta_plastic_strain=np.asarray(delta, dtype=float),
+            **self.STATE,
+        )
 
-    def test_matches_the_composed_primitives(self):
-        # advance() must be exactly triaxiality -> fracture strain -> accumulate,
-        # or the supervisor's preview and the running solver disagree.
+    def test_initiation_advances_only_where_plastic_strain_grew(self):
+        step = self.advance_from([0.0, 0.0], [0.0, 0.0], [1.0, 0.0])
+        assert step.initiation[0] > 0.0
+        assert step.initiation[1] == 0.0
+
+    def test_initiation_matches_the_composed_primitives(self):
         triaxiality = triaxiality_from_plane_strain_stress(
-            self.STATE["cauchy_xx"],
-            self.STATE["cauchy_yy"],
-            self.STATE["equivalent_stress"],
+            self.STATE["cauchy_xx"], self.STATE["cauchy_yy"], self.STATE["equivalent_stress"]
         )
         expected = accumulate_damage(
             damage=np.array([0.0, 0.0]),
-            delta_plastic_strain=self.STATE["delta_plastic_strain"],
+            delta_plastic_strain=np.array([1.0, 0.0]),
             fracture_strain=fracture_strain(
                 PARAMS,
                 triaxiality=triaxiality,
@@ -257,22 +264,74 @@ class TestAdvance:
                 temperature_k=self.STATE["temperature_k"],
             ),
         )
-        step = advance(PARAMS, damage=np.array([0.0, 0.0]), **self.STATE)
-        assert step.damage == pytest.approx(expected)
+        step = self.advance_from([0.0, 0.0], [0.0, 0.0], [1.0, 0.0])
+        assert step.initiation == pytest.approx(expected)
 
-    def test_flags_points_that_reach_the_separation_threshold(self):
-        step = advance(PARAMS, damage=np.array([0.99, 0.0]), **self.STATE)
-        assert step.separated.tolist() == [True, False]
+    def test_damage_stays_at_zero_before_initiation_completes(self):
+        # The distinction that matters: heavily yielded but not yet initiated
+        # material is undamaged and carries full stress.
+        step = self.advance_from([0.0, 0.0], [0.0, 0.0], [1.0, 1.0])
+        assert step.initiation[0] < 1.0
+        assert step.damage == pytest.approx([0.0, 0.0])
+        assert not step.separated.any()
 
-    def test_lowering_the_threshold_separates_more_points(self):
-        # The supervisor's adjust_deletion_threshold action: the same state
-        # under a looser criterion must separate at least as many points.
-        state = dict(self.STATE, delta_plastic_strain=np.array([1.0, 1.0]))
-        strict = advance(PARAMS, damage=np.array([0.0, 0.0]), separation_threshold=1.0, **state)
-        loose = advance(PARAMS, damage=np.array([0.0, 0.0]), separation_threshold=0.2, **state)
-        assert loose.separated.sum() > strict.separated.sum()
+    def test_damage_evolves_once_initiation_is_complete(self):
+        step = self.advance_from([1.0, 0.0], [0.0, 0.0], [0.5, 0.5])
+        assert step.damage[0] > 0.0  # initiated
+        assert step.damage[1] == 0.0  # not initiated
 
-    def test_does_not_mutate_the_damage_it_is_given(self):
-        original = np.array([0.5, 0.5])
-        advance(PARAMS, damage=original, **self.STATE)
-        assert original == pytest.approx([0.5, 0.5])
+    def test_evolution_is_scaled_by_the_characteristic_length(self):
+        # Damage per unit strain doubles when the point does — the mesh
+        # regularization, seen end to end.
+        step = advance(
+            PARAMS,
+            initiation=np.array([1.0, 1.0]),
+            damage=np.array([0.0, 0.0]),
+            delta_plastic_strain=np.array([0.1, 0.1]),
+            cauchy_xx=np.array([100e6, 100e6]),
+            cauchy_yy=np.array([-100e6, -100e6]),
+            equivalent_stress=np.array([100e6, 100e6]),
+            plastic_strain_rate_per_s=np.array([1.0, 1.0]),
+            temperature_k=np.array([300.0, 300.0]),
+            characteristic_length_m=np.array([2e-3, 1e-3]),
+            fracture_displacement_m=np.array([1e-3, 1e-3]),
+        )
+        assert step.damage[0] == pytest.approx(2.0 * step.damage[1])
+
+    def test_separates_only_when_evolution_completes(self):
+        # A point at full initiation but no evolution has not separated.
+        just_initiated = self.advance_from([1.0], [0.0], [0.0])
+        assert not just_initiated.separated[0]
+        fully_evolved = self.advance_from([1.0], [0.9], [1.0])
+        assert fully_evolved.separated[0]
+
+    def test_lowering_the_threshold_separates_earlier(self):
+        # The supervisor's adjust_deletion_threshold action.
+        strict = advance(
+            PARAMS,
+            initiation=np.array([1.0]),
+            damage=np.array([0.3]),
+            delta_plastic_strain=np.array([0.0]),
+            cauchy_xx=np.array([100e6]),
+            cauchy_yy=np.array([-100e6]),
+            equivalent_stress=np.array([100e6]),
+            plastic_strain_rate_per_s=np.array([1.0]),
+            temperature_k=np.array([300.0]),
+            characteristic_length_m=np.array([1e-3]),
+            fracture_displacement_m=np.array([1e-3]),
+            separation_threshold=0.2,
+        )
+        assert strict.separated[0]
+
+    def test_does_not_mutate_the_state_it_is_given(self):
+        initiation = np.array([0.5, 0.5])
+        damage = np.array([0.1, 0.1])
+        advance(
+            PARAMS,
+            initiation=initiation,
+            damage=damage,
+            delta_plastic_strain=np.array([0.1, 0.1]),
+            **self.STATE,
+        )
+        assert initiation == pytest.approx([0.5, 0.5])
+        assert damage == pytest.approx([0.1, 0.1])
